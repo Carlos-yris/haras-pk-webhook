@@ -15,61 +15,54 @@ const ZAPI_CLIENT_TOKEN = process.env.ZAPI_CLIENT_TOKEN;
 const ZAPI_URL = `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}`;
 const ZAPI_HEADERS = { 'Client-Token': ZAPI_CLIENT_TOKEN };
 
-// ── Startup env check ────────────────────────────────────────────────────────
 console.log('[ENV] ZAPI_INSTANCE:', ZAPI_INSTANCE ? `OK (${ZAPI_INSTANCE.slice(0, 6)}...)` : 'MISSING');
-console.log('[ENV] ZAPI_TOKEN:', ZAPI_TOKEN ? 'OK' : 'MISSING');
-console.log('[ENV] ZAPI_CLIENT_TOKEN:', ZAPI_CLIENT_TOKEN ? `OK (${ZAPI_CLIENT_TOKEN.slice(0, 6)}...)` : 'MISSING');
+console.log('[ENV] ZAPI_CLIENT_TOKEN:', ZAPI_CLIENT_TOKEN ? 'OK' : 'MISSING');
 console.log('[ENV] TYPEBOT_TOKEN:', TYPEBOT_TOKEN ? 'OK' : 'MISSING');
-console.log('[ENV] TYPEBOT_API_URL:', TYPEBOT_API_URL);
 
-// ── Sessões persistidas em arquivo com TTL ────────────────────────────────────
+// ── Sessões persistidas com TTL + choices ─────────────────────────────────────
 const SESSIONS_FILE = '/app/sessions.json';
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutos
 
 function loadSessions() {
   try {
-    if (fs.existsSync(SESSIONS_FILE)) {
-      return JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
-    }
-  } catch (e) {
-    console.error('[SESSIONS] erro ao carregar:', e.message);
-  }
+    if (fs.existsSync(SESSIONS_FILE)) return JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+  } catch (e) { console.error('[SESSIONS] load error:', e.message); }
   return {};
 }
 
-function saveSessions(sessions) {
-  try {
-    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions), 'utf8');
-  } catch (e) {
-    console.error('[SESSIONS] erro ao salvar:', e.message);
-  }
+function saveSessions(s) {
+  try { fs.writeFileSync(SESSIONS_FILE, JSON.stringify(s), 'utf8'); }
+  catch (e) { console.error('[SESSIONS] save error:', e.message); }
 }
 
-function pruneExpired(sessions) {
+function pruneExpired(s) {
   const now = Date.now();
-  let pruned = 0;
-  for (const phone of Object.keys(sessions)) {
-    const s = sessions[phone];
-    if (s.at && now - s.at > SESSION_TTL_MS) {
-      delete sessions[phone];
-      pruned++;
-    }
+  let n = 0;
+  for (const p of Object.keys(s)) {
+    if (!s[p].at || now - s[p].at > SESSION_TTL_MS) { delete s[p]; n++; }
   }
-  if (pruned) {
-    console.log('[SESSIONS] expiradas removidas:', pruned);
-    saveSessions(sessions);
-  }
+  if (n) { console.log('[SESSIONS] expiradas:', n); saveSessions(s); }
 }
 
 const sessions = loadSessions();
 pruneExpired(sessions);
 console.log('[SESSIONS] carregadas:', Object.keys(sessions).length);
 
+// ── Deduplicação de mensagens recebidas ───────────────────────────────────────
+const recentMsgIds = new Set();
+function isDuplicate(msgId) {
+  if (!msgId) return false;
+  if (recentMsgIds.has(msgId)) return true;
+  recentMsgIds.add(msgId);
+  // Limpa após 5 min para não crescer indefinidamente
+  setTimeout(() => recentMsgIds.delete(msgId), 5 * 60 * 1000);
+  return false;
+}
+
 // ── Z-API helpers ─────────────────────────────────────────────────────────────
 async function zapiPost(endpoint, body) {
-  const url = `${ZAPI_URL}/${endpoint}`;
   try {
-    const resp = await axios.post(url, body, { headers: ZAPI_HEADERS });
+    const resp = await axios.post(`${ZAPI_URL}/${endpoint}`, body, { headers: ZAPI_HEADERS });
     console.log(`[ZAPI-OK] ${endpoint} →`, resp.data?.messageId || resp.status);
     return resp.data;
   } catch (err) {
@@ -85,42 +78,40 @@ async function sendToZapi(phone, message) {
       if (!text) return;
       console.log('[SEND-TEXT]', phone, '->', text.slice(0, 80));
       await zapiPost('send-text', { phone, message: text });
-
     } else if (message.type === 'image') {
       console.log('[SEND-IMAGE]', phone, '->', message.content.url);
       const payload = { phone, image: message.content.url };
       if (message.content.caption) payload.caption = message.content.caption;
       await zapiPost('send-image', payload);
-
     } else if (message.type === 'video') {
       const payload = { phone, video: message.content.url };
       if (message.content.caption) payload.caption = message.content.caption;
       await zapiPost('send-video', payload);
-
     } else {
       console.log('[SKIP] tipo:', message.type);
     }
-  } catch (err) {
-    // erro já logado em zapiPost
-  }
+  } catch (_) { /* erro já logado */ }
 }
 
 async function sendButtons(phone, text, buttons) {
   const options = buttons.map((b, i) => `${i + 1}. ${b.content}`).join('\n');
-  const full = `${text}\n\n${options}`;
   console.log('[SEND-BUTTONS]', phone, `(${buttons.length} opções)`);
-  try {
-    await zapiPost('send-text', { phone, message: full });
-  } catch (err) {
-    // erro já logado em zapiPost
-  }
+  try { await zapiPost('send-text', { phone, message: `${text}\n\n${options}` }); }
+  catch (_) { /* erro já logado */ }
 }
 
 async function processTypebotResponse(phone, data) {
   const messages = data.messages || [];
   const input = data.input;
 
-  if (input && input.type === 'choice input') {
+  // Salva as opções disponíveis na sessão para mapear número → texto
+  if (input?.type === 'choice input' && sessions[phone]) {
+    sessions[phone].choices = input.items.map((it) => it.content);
+    sessions[phone].at = Date.now();
+    saveSessions(sessions);
+  }
+
+  if (input?.type === 'choice input') {
     const buttons = input.items || [];
     const lastText = messages.filter((m) => m.type === 'text').pop();
     const others = lastText ? messages.filter((m) => m !== lastText) : messages;
@@ -150,14 +141,28 @@ app.post('/webhook', async (req, res) => {
   const body = req.body;
   if (body.fromMe) return;
 
-  const phone = body.phone || body.from;
-  const text = body.text?.message || body.message || body.text || '';
-
-  console.log('[RECV]', phone, '|', String(text).slice(0, 60));
-
-  if (!phone || !text) {
-    console.log('[SKIP] sem phone ou texto');
+  // Deduplicação: ignora webhook duplicado do Z-API
+  const msgId = body.messageId || body.id;
+  if (isDuplicate(msgId)) {
+    console.log('[DEDUP] ignorando duplicata:', msgId);
     return;
+  }
+
+  const phone = body.phone || body.from;
+  let text = body.text?.message || body.message || body.text || '';
+  text = String(text).trim();
+
+  console.log('[RECV]', phone, '|', text.slice(0, 60));
+  if (!phone || !text) { console.log('[SKIP] sem phone ou texto'); return; }
+
+  // Mapear número → texto do botão se houver choices salvas
+  const sess = sessions[phone];
+  if (sess?.choices && /^\d+$/.test(text)) {
+    const idx = parseInt(text, 10) - 1;
+    if (idx >= 0 && idx < sess.choices.length) {
+      console.log('[CHOICE] mapeado:', text, '->', sess.choices[idx]);
+      text = sess.choices[idx];
+    }
   }
 
   pruneExpired(sessions);
@@ -172,24 +177,23 @@ app.post('/webhook', async (req, res) => {
         { prefilledVariables: { phone } },
         { headers: { Authorization: `Bearer ${TYPEBOT_TOKEN}` } }
       );
-      sessions[phone] = { id: resp.data.sessionId, at: Date.now() };
+      sessions[phone] = { id: resp.data.sessionId, at: Date.now(), choices: null };
       saveSessions(sessions);
       console.log('[SESSION] nova:', resp.data.sessionId);
       return resp.data;
     };
 
-    if (sessions[phone]) {
-      const sid = sessions[phone].id || sessions[phone];
-      console.log('[SESSION] continuando:', sid);
+    if (sess?.id) {
+      console.log('[SESSION] continuando:', sess.id);
       try {
         const resp = await axios.post(
-          `${TYPEBOT_API_URL}/api/v1/sessions/${sid}/continueChat`,
-          { message: String(text) },
+          `${TYPEBOT_API_URL}/api/v1/sessions/${sess.id}/continueChat`,
+          { message: text },
           { headers: { Authorization: `Bearer ${TYPEBOT_TOKEN}` } }
         );
         responseData = resp.data;
-        // atualiza timestamp de atividade
-        sessions[phone] = { id: sid, at: Date.now() };
+        sessions[phone].at = Date.now();
+        sessions[phone].choices = null; // limpa choices após resposta
         saveSessions(sessions);
         if (responseData.status === 'ended') {
           delete sessions[phone];
@@ -197,7 +201,6 @@ app.post('/webhook', async (req, res) => {
           console.log('[SESSION] encerrada');
         }
       } catch (sessionErr) {
-        // Sessão expirada ou inválida no Typebot → reinicia
         console.log('[SESSION] inválida, reiniciando. Erro:', sessionErr.response?.status || sessionErr.message);
         delete sessions[phone];
         saveSessions(sessions);
@@ -208,8 +211,7 @@ app.post('/webhook', async (req, res) => {
     }
 
     const msgTypes = (responseData.messages || []).map((m) => m.type);
-    const inputType = responseData.input?.type || 'none';
-    console.log('[TYPEBOT]', `msgs: [${msgTypes}] input: ${inputType}`);
+    console.log('[TYPEBOT]', `msgs:[${msgTypes}] input:${responseData.input?.type || 'none'}`);
 
     await processTypebotResponse(phone, responseData);
   } catch (err) {
@@ -217,53 +219,42 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// ── Debug endpoint ─────────────────────────────────────────────────────────────
+// ── Endpoints utilitários ─────────────────────────────────────────────────────
 app.get('/debug', async (req, res) => {
   const phone = req.query.phone || '5521959435722';
   const result = {
     env: {
       ZAPI_INSTANCE: ZAPI_INSTANCE ? `OK (${ZAPI_INSTANCE.slice(0, 6)}...)` : 'MISSING',
-      ZAPI_TOKEN: ZAPI_TOKEN ? 'OK' : 'MISSING',
-      ZAPI_CLIENT_TOKEN: ZAPI_CLIENT_TOKEN ? `OK (${ZAPI_CLIENT_TOKEN.slice(0, 6)}...)` : 'MISSING',
+      ZAPI_CLIENT_TOKEN: ZAPI_CLIENT_TOKEN ? 'OK' : 'MISSING',
       TYPEBOT_TOKEN: TYPEBOT_TOKEN ? 'OK' : 'MISSING',
       TYPEBOT_API_URL,
     },
     sessions: Object.keys(sessions).length,
     zapiTest: null,
   };
-
   try {
     const resp = await axios.post(`${ZAPI_URL}/send-text`, {
-      phone,
-      message: '[DEBUG] container consegue enviar para Z-API?',
+      phone, message: '[DEBUG] container OK',
     }, { headers: ZAPI_HEADERS });
-    result.zapiTest = { ok: true, data: resp.data };
+    result.zapiTest = { ok: true, messageId: resp.data?.messageId };
   } catch (err) {
-    result.zapiTest = { ok: false, status: err.response?.status, error: err.response?.data || err.message };
+    result.zapiTest = { ok: false, error: err.response?.data || err.message };
   }
-
   res.json(result);
 });
 
-// Resetar sessão de um número específico
 app.get('/reset/:phone', (req, res) => {
   const { phone } = req.params;
-  if (sessions[phone]) {
-    delete sessions[phone];
-    saveSessions(sessions);
-    console.log('[RESET] sessão removida:', phone);
-    res.json({ ok: true, message: `Sessão de ${phone} removida` });
-  } else {
-    res.json({ ok: true, message: `Sem sessão ativa para ${phone}` });
-  }
+  if (sessions[phone]) { delete sessions[phone]; saveSessions(sessions); }
+  console.log('[RESET]', phone);
+  res.json({ ok: true, message: `Sessão de ${phone} removida` });
 });
 
-// Limpar todas as sessões
 app.get('/clear-sessions', (_, res) => {
   const count = Object.keys(sessions).length;
   for (const k of Object.keys(sessions)) delete sessions[k];
   saveSessions(sessions);
-  console.log('[CLEAR] todas as sessões removidas:', count);
+  console.log('[CLEAR] sessões:', count);
   res.json({ ok: true, cleared: count });
 });
 
