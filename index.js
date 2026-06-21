@@ -1,5 +1,6 @@
 const express = require('express');
 const axios = require('axios');
+const fs = require('fs');
 
 const app = express();
 app.use(express.json());
@@ -14,43 +15,87 @@ const ZAPI_CLIENT_TOKEN = process.env.ZAPI_CLIENT_TOKEN;
 const ZAPI_URL = `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}`;
 const ZAPI_HEADERS = { 'Client-Token': ZAPI_CLIENT_TOKEN };
 
-// phone -> sessionId
-const sessions = {};
+// ── Startup env check ────────────────────────────────────────────────────────
+console.log('[ENV] ZAPI_INSTANCE:', ZAPI_INSTANCE ? `OK (${ZAPI_INSTANCE.slice(0, 6)}...)` : 'MISSING');
+console.log('[ENV] ZAPI_TOKEN:', ZAPI_TOKEN ? 'OK' : 'MISSING');
+console.log('[ENV] ZAPI_CLIENT_TOKEN:', ZAPI_CLIENT_TOKEN ? `OK (${ZAPI_CLIENT_TOKEN.slice(0, 6)}...)` : 'MISSING');
+console.log('[ENV] TYPEBOT_TOKEN:', TYPEBOT_TOKEN ? 'OK' : 'MISSING');
+console.log('[ENV] TYPEBOT_API_URL:', TYPEBOT_API_URL);
+
+// ── Sessões persistidas em arquivo ───────────────────────────────────────────
+const SESSIONS_FILE = '/app/sessions.json';
+
+function loadSessions() {
+  try {
+    if (fs.existsSync(SESSIONS_FILE)) {
+      return JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+    }
+  } catch (e) {
+    console.error('[SESSIONS] erro ao carregar:', e.message);
+  }
+  return {};
+}
+
+function saveSessions(sessions) {
+  try {
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions), 'utf8');
+  } catch (e) {
+    console.error('[SESSIONS] erro ao salvar:', e.message);
+  }
+}
+
+const sessions = loadSessions();
+console.log('[SESSIONS] carregadas:', Object.keys(sessions).length);
+
+// ── Z-API helpers ─────────────────────────────────────────────────────────────
+async function zapiPost(endpoint, body) {
+  const url = `${ZAPI_URL}/${endpoint}`;
+  try {
+    const resp = await axios.post(url, body, { headers: ZAPI_HEADERS });
+    console.log(`[ZAPI-OK] ${endpoint} →`, resp.data?.messageId || resp.status);
+    return resp.data;
+  } catch (err) {
+    console.error(`[ZAPI-ERR] ${endpoint} →`, err.response?.status, JSON.stringify(err.response?.data || err.message));
+    throw err;
+  }
+}
 
 async function sendToZapi(phone, message) {
   try {
     if (message.type === 'text') {
       const text = message.content?.markdown || message.content?.plainText || '';
-      if (!text) {
-        console.log('[SKIP] mensagem text sem conteúdo:', JSON.stringify(message.content));
-        return;
-      }
+      if (!text) return;
       console.log('[SEND-TEXT]', phone, '->', text.slice(0, 80));
-      await axios.post(`${ZAPI_URL}/send-text`, { phone, message: text }, { headers: ZAPI_HEADERS });
+      await zapiPost('send-text', { phone, message: text });
+
     } else if (message.type === 'image') {
       console.log('[SEND-IMAGE]', phone, '->', message.content.url);
       const payload = { phone, image: message.content.url };
       if (message.content.caption) payload.caption = message.content.caption;
-      await axios.post(`${ZAPI_URL}/send-image`, payload, { headers: ZAPI_HEADERS });
+      await zapiPost('send-image', payload);
+
     } else if (message.type === 'video') {
       const payload = { phone, video: message.content.url };
       if (message.content.caption) payload.caption = message.content.caption;
-      await axios.post(`${ZAPI_URL}/send-video`, payload, { headers: ZAPI_HEADERS });
+      await zapiPost('send-video', payload);
+
     } else {
-      console.log('[SKIP] tipo não suportado:', message.type);
+      console.log('[SKIP] tipo:', message.type);
     }
   } catch (err) {
-    console.error('[ZAPI-ERR] send:', err.response?.status, JSON.stringify(err.response?.data), err.message);
+    // erro já logado em zapiPost
   }
 }
 
 async function sendButtons(phone, text, buttons) {
   const options = buttons.map((b, i) => `${i + 1}. ${b.content}`).join('\n');
-  console.log('[SEND-BUTTONS]', phone, '| text+options');
-  await axios.post(`${ZAPI_URL}/send-text`, {
-    phone,
-    message: `${text}\n\n${options}`,
-  }, { headers: ZAPI_HEADERS });
+  const full = `${text}\n\n${options}`;
+  console.log('[SEND-BUTTONS]', phone, `(${buttons.length} opções)`);
+  try {
+    await zapiPost('send-text', { phone, message: full });
+  } catch (err) {
+    // erro já logado em zapiPost
+  }
 }
 
 async function processTypebotResponse(phone, data) {
@@ -60,11 +105,11 @@ async function processTypebotResponse(phone, data) {
   if (input && input.type === 'choice input') {
     const buttons = input.items || [];
     const lastText = messages.filter((m) => m.type === 'text').pop();
-    const otherMessages = lastText ? messages.filter((m) => m !== lastText) : messages;
+    const others = lastText ? messages.filter((m) => m !== lastText) : messages;
 
-    for (const msg of otherMessages) {
+    for (const msg of others) {
       await sendToZapi(phone, msg);
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 800));
     }
 
     const caption = lastText
@@ -75,36 +120,46 @@ async function processTypebotResponse(phone, data) {
   } else {
     for (const msg of messages) {
       await sendToZapi(phone, msg);
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 800));
     }
   }
 }
 
+// ── Webhook ───────────────────────────────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
 
   const body = req.body;
-
-  // Ignora mensagens enviadas pelo próprio bot
   if (body.fromMe) return;
 
   const phone = body.phone || body.from;
-  const text = body.text?.message || body.message || '';
+  const text = body.text?.message || body.message || body.text || '';
 
-  if (!phone || !text) return;
+  console.log('[RECV]', phone, '|', String(text).slice(0, 60));
+
+  if (!phone || !text) {
+    console.log('[SKIP] sem phone ou texto');
+    return;
+  }
 
   try {
     let responseData;
 
     if (sessions[phone]) {
+      console.log('[SESSION] continuando:', sessions[phone]);
       const resp = await axios.post(
         `${TYPEBOT_API_URL}/api/v1/sessions/${sessions[phone]}/continueChat`,
-        { message: text },
+        { message: String(text) },
         { headers: { Authorization: `Bearer ${TYPEBOT_TOKEN}` } }
       );
       responseData = resp.data;
-      if (responseData.status === 'ended') delete sessions[phone];
+      if (responseData.status === 'ended') {
+        delete sessions[phone];
+        saveSessions(sessions);
+        console.log('[SESSION] encerrada');
+      }
     } else {
+      console.log('[SESSION] iniciando novo chat');
       const resp = await axios.post(
         `${TYPEBOT_API_URL}/api/v1/typebots/${TYPEBOT_ID}/startChat`,
         { prefilledVariables: { phone } },
@@ -112,13 +167,46 @@ app.post('/webhook', async (req, res) => {
       );
       responseData = resp.data;
       sessions[phone] = resp.data.sessionId;
+      saveSessions(sessions);
+      console.log('[SESSION] nova:', resp.data.sessionId);
     }
 
-    console.log('[TYPEBOT]', JSON.stringify(responseData).slice(0, 500));
+    const msgTypes = (responseData.messages || []).map((m) => m.type);
+    const inputType = responseData.input?.type || 'none';
+    console.log('[TYPEBOT]', `msgs: [${msgTypes}] input: ${inputType}`);
+
     await processTypebotResponse(phone, responseData);
   } catch (err) {
-    console.error('Erro no webhook:', err.response?.data || err.message);
+    console.error('[WEBHOOK-ERR]', err.response?.status, JSON.stringify(err.response?.data || err.message));
   }
+});
+
+// ── Debug endpoint ─────────────────────────────────────────────────────────────
+app.get('/debug', async (req, res) => {
+  const phone = req.query.phone || '5521959435722';
+  const result = {
+    env: {
+      ZAPI_INSTANCE: ZAPI_INSTANCE ? `OK (${ZAPI_INSTANCE.slice(0, 6)}...)` : 'MISSING',
+      ZAPI_TOKEN: ZAPI_TOKEN ? 'OK' : 'MISSING',
+      ZAPI_CLIENT_TOKEN: ZAPI_CLIENT_TOKEN ? `OK (${ZAPI_CLIENT_TOKEN.slice(0, 6)}...)` : 'MISSING',
+      TYPEBOT_TOKEN: TYPEBOT_TOKEN ? 'OK' : 'MISSING',
+      TYPEBOT_API_URL,
+    },
+    sessions: Object.keys(sessions).length,
+    zapiTest: null,
+  };
+
+  try {
+    const resp = await axios.post(`${ZAPI_URL}/send-text`, {
+      phone,
+      message: '[DEBUG] container consegue enviar para Z-API?',
+    }, { headers: ZAPI_HEADERS });
+    result.zapiTest = { ok: true, data: resp.data };
+  } catch (err) {
+    result.zapiTest = { ok: false, status: err.response?.status, error: err.response?.data || err.message };
+  }
+
+  res.json(result);
 });
 
 app.get('/health', (_, res) => res.json({ ok: true }));
