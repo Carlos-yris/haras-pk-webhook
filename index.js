@@ -20,10 +20,13 @@ const sessions = {};
 async function sendToZapi(phone, message) {
   try {
     if (message.type === 'text') {
-      await axios.post(`${ZAPI_URL}/send-text`, {
-        phone,
-        message: message.content.markdown || message.content.plainText || '',
-      }, { headers: ZAPI_HEADERS });
+      const text = message.content?.markdown || message.content?.plainText || '';
+      if (!text) {
+        console.log('[SKIP] mensagem text sem conteúdo:', JSON.stringify(message.content));
+        return;
+      }
+      console.log('[SEND-TEXT]', phone, '->', text.slice(0, 80));
+      await axios.post(`${ZAPI_URL}/send-text`, { phone, message: text }, { headers: ZAPI_HEADERS });
     } else if (message.type === 'image') {
       await axios.post(`${ZAPI_URL}/send-image`, {
         phone,
@@ -36,27 +39,35 @@ async function sendToZapi(phone, message) {
         video: message.content.url,
         caption: message.content.caption || '',
       }, { headers: ZAPI_HEADERS });
+    } else {
+      console.log('[SKIP] tipo não suportado:', message.type);
     }
   } catch (err) {
-    console.error('Erro ao enviar para Z-API:', err.message);
+    console.error('[ZAPI-ERR] send:', err.response?.status, JSON.stringify(err.response?.data), err.message);
   }
 }
 
 async function sendButtons(phone, text, buttons) {
+  const buttonList = buttons.map((b) => ({ label: b.content }));
+  console.log('[SEND-BUTTONS]', phone, '| caption:', text.slice(0, 60), '| buttons:', buttonList.map(b => b.label));
   try {
-    const buttonList = buttons.map((b) => ({ label: b.content }));
     await axios.post(`${ZAPI_URL}/send-button-list`, {
       phone,
       message: text,
       buttonList: { buttons: buttonList },
     }, { headers: ZAPI_HEADERS });
   } catch (err) {
-    // fallback: envia como texto com opções numeradas
+    console.error('[ZAPI-ERR] send-button-list:', err.response?.status, JSON.stringify(err.response?.data));
+    // fallback: texto com opções numeradas
     const options = buttons.map((b, i) => `${i + 1}. ${b.content}`).join('\n');
-    await axios.post(`${ZAPI_URL}/send-text`, {
-      phone,
-      message: `${text}\n\n${options}`,
-    }, { headers: ZAPI_HEADERS });
+    try {
+      await axios.post(`${ZAPI_URL}/send-text`, {
+        phone,
+        message: `${text}\n\n${options}`,
+      }, { headers: ZAPI_HEADERS });
+    } catch (err2) {
+      console.error('[ZAPI-ERR] fallback send-text:', err2.response?.status, JSON.stringify(err2.response?.data));
+    }
   }
 }
 
@@ -104,19 +115,14 @@ app.post('/webhook', async (req, res) => {
     let responseData;
 
     if (sessions[phone]) {
-      // Continua sessão existente
       const resp = await axios.post(
         `${TYPEBOT_API_URL}/api/v1/sessions/${sessions[phone]}/continueChat`,
         { message: text },
         { headers: { Authorization: `Bearer ${TYPEBOT_TOKEN}` } }
       );
       responseData = resp.data;
-
-      if (responseData.status === 'ended') {
-        delete sessions[phone];
-      }
+      if (responseData.status === 'ended') delete sessions[phone];
     } else {
-      // Inicia nova sessão
       const resp = await axios.post(
         `${TYPEBOT_API_URL}/api/v1/typebots/${TYPEBOT_ID}/startChat`,
         { prefilledVariables: { phone } },
@@ -126,6 +132,7 @@ app.post('/webhook', async (req, res) => {
       sessions[phone] = resp.data.sessionId;
     }
 
+    console.log('[TYPEBOT]', JSON.stringify(responseData).slice(0, 500));
     await processTypebotResponse(phone, responseData);
   } catch (err) {
     console.error('Erro no webhook:', err.response?.data || err.message);
