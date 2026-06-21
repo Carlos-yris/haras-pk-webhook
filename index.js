@@ -29,21 +29,9 @@ async function sendToZapi(phone, message) {
       await axios.post(`${ZAPI_URL}/send-text`, { phone, message: text }, { headers: ZAPI_HEADERS });
     } else if (message.type === 'image') {
       console.log('[SEND-IMAGE]', phone, '->', message.content.url);
-      try {
-        const imgRes = await axios.get(message.content.url, { responseType: 'arraybuffer' });
-        const mime = (imgRes.headers['content-type'] || 'image/jpeg').split(';')[0].trim();
-        const b64 = `data:${mime};base64,${Buffer.from(imgRes.data).toString('base64')}`;
-        const payload = { phone, image: b64 };
-        if (message.content.caption) payload.caption = message.content.caption;
-        await axios.post(`${ZAPI_URL}/send-image`, payload, { headers: ZAPI_HEADERS });
-      } catch (imgErr) {
-        console.error('[IMG-FALLBACK] falhou, enviando como link:', imgErr.message);
-        const caption = message.content.caption ? `\n${message.content.caption}` : '';
-        await axios.post(`${ZAPI_URL}/send-text`, {
-          phone,
-          message: `${message.content.url}${caption}`,
-        }, { headers: ZAPI_HEADERS });
-      }
+      const payload = { phone, image: message.content.url };
+      if (message.content.caption) payload.caption = message.content.caption;
+      await axios.post(`${ZAPI_URL}/send-image`, payload, { headers: ZAPI_HEADERS });
     } else if (message.type === 'video') {
       const payload = { phone, video: message.content.url };
       if (message.content.caption) payload.caption = message.content.caption;
@@ -57,27 +45,12 @@ async function sendToZapi(phone, message) {
 }
 
 async function sendButtons(phone, text, buttons) {
-  const buttonList = buttons.map((b) => ({ label: b.content }));
-  console.log('[SEND-BUTTONS]', phone, '| caption:', text.slice(0, 60), '| buttons:', buttonList.map(b => b.label));
-  try {
-    await axios.post(`${ZAPI_URL}/send-button-list`, {
-      phone,
-      message: text,
-      buttonList: { buttons: buttonList },
-    }, { headers: ZAPI_HEADERS });
-  } catch (err) {
-    console.error('[ZAPI-ERR] send-button-list:', err.response?.status, JSON.stringify(err.response?.data));
-    // fallback: texto com opções numeradas
-    const options = buttons.map((b, i) => `${i + 1}. ${b.content}`).join('\n');
-    try {
-      await axios.post(`${ZAPI_URL}/send-text`, {
-        phone,
-        message: `${text}\n\n${options}`,
-      }, { headers: ZAPI_HEADERS });
-    } catch (err2) {
-      console.error('[ZAPI-ERR] fallback send-text:', err2.response?.status, JSON.stringify(err2.response?.data));
-    }
-  }
+  const options = buttons.map((b, i) => `${i + 1}. ${b.content}`).join('\n');
+  console.log('[SEND-BUTTONS]', phone, '| text+options');
+  await axios.post(`${ZAPI_URL}/send-text`, {
+    phone,
+    message: `${text}\n\n${options}`,
+  }, { headers: ZAPI_HEADERS });
 }
 
 async function processTypebotResponse(phone, data) {
