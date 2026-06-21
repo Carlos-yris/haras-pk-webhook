@@ -4,7 +4,7 @@ const axios = require('axios');
 const app = express();
 app.use(express.json());
 
-const TYPEBOT_API_URL = process.env.TYPEBOT_API_URL || 'http://haras_pk_typebot-viewer:3000';
+const TYPEBOT_API_URL = process.env.TYPEBOT_API_URL || 'http://haras_pk_typebot-builder:3000';
 const TYPEBOT_ID = 'bot-festa-kaick-1-1e0ubq6';
 const TYPEBOT_TOKEN = process.env.TYPEBOT_TOKEN;
 
