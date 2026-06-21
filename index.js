@@ -4,13 +4,15 @@ const axios = require('axios');
 const app = express();
 app.use(express.json());
 
-const TYPEBOT_API_URL = process.env.TYPEBOT_API_URL || 'http://haras_pk_typebot-builder:3000';
+const TYPEBOT_API_URL = process.env.TYPEBOT_API_URL || 'https://haras-pk-typebot-viewer.royura.easypanel.host';
 const TYPEBOT_ID = 'bot-festa-kaick-1-1e0ubq6';
 const TYPEBOT_TOKEN = process.env.TYPEBOT_TOKEN;
 
 const ZAPI_INSTANCE = process.env.ZAPI_INSTANCE;
 const ZAPI_TOKEN = process.env.ZAPI_TOKEN;
+const ZAPI_CLIENT_TOKEN = process.env.ZAPI_CLIENT_TOKEN;
 const ZAPI_URL = `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}`;
+const ZAPI_HEADERS = { 'Client-Token': ZAPI_CLIENT_TOKEN };
 
 // phone -> sessionId
 const sessions = {};
@@ -21,19 +23,19 @@ async function sendToZapi(phone, message) {
       await axios.post(`${ZAPI_URL}/send-text`, {
         phone,
         message: message.content.markdown || message.content.plainText || '',
-      });
+      }, { headers: ZAPI_HEADERS });
     } else if (message.type === 'image') {
       await axios.post(`${ZAPI_URL}/send-image`, {
         phone,
         image: message.content.url,
         caption: message.content.caption || '',
-      });
+      }, { headers: ZAPI_HEADERS });
     } else if (message.type === 'video') {
       await axios.post(`${ZAPI_URL}/send-video`, {
         phone,
         video: message.content.url,
         caption: message.content.caption || '',
-      });
+      }, { headers: ZAPI_HEADERS });
     }
   } catch (err) {
     console.error('Erro ao enviar para Z-API:', err.message);
@@ -47,14 +49,14 @@ async function sendButtons(phone, text, buttons) {
       phone,
       message: text,
       buttonList: { buttons: buttonList },
-    });
+    }, { headers: ZAPI_HEADERS });
   } catch (err) {
     // fallback: envia como texto com opções numeradas
     const options = buttons.map((b, i) => `${i + 1}. ${b.content}`).join('\n');
     await axios.post(`${ZAPI_URL}/send-text`, {
       phone,
       message: `${text}\n\n${options}`,
-    });
+    }, { headers: ZAPI_HEADERS });
   }
 }
 
