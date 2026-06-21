@@ -4,8 +4,8 @@ const axios = require('axios');
 const app = express();
 app.use(express.json());
 
-const TYPEBOT_API_URL = 'https://haras-pk-typebot-builder.royura.easypanel.host';
-const TYPEBOT_ID = 'zv4xkippzasw8d3rk1e0ubq6';
+const TYPEBOT_API_URL = 'https://haras-pk-typebot-viewer.royura.easypanel.host';
+const TYPEBOT_ID = 'bot-festa-kaick-1-1e0ubq6';
 const TYPEBOT_TOKEN = process.env.TYPEBOT_TOKEN;
 
 const ZAPI_INSTANCE = process.env.ZAPI_INSTANCE;
