@@ -28,9 +28,12 @@ async function sendToZapi(phone, message) {
       console.log('[SEND-TEXT]', phone, '->', text.slice(0, 80));
       await axios.post(`${ZAPI_URL}/send-text`, { phone, message: text }, { headers: ZAPI_HEADERS });
     } else if (message.type === 'image') {
-      const payload = { phone, image: message.content.url };
-      if (message.content.caption) payload.caption = message.content.caption;
       console.log('[SEND-IMAGE]', phone, '->', message.content.url);
+      const imgRes = await axios.get(message.content.url, { responseType: 'arraybuffer' });
+      const mime = imgRes.headers['content-type'] || 'image/jpeg';
+      const b64 = `data:${mime};base64,${Buffer.from(imgRes.data).toString('base64')}`;
+      const payload = { phone, image: b64 };
+      if (message.content.caption) payload.caption = message.content.caption;
       await axios.post(`${ZAPI_URL}/send-image`, payload, { headers: ZAPI_HEADERS });
     } else if (message.type === 'video') {
       const payload = { phone, video: message.content.url };
