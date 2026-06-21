@@ -22,8 +22,9 @@ console.log('[ENV] ZAPI_CLIENT_TOKEN:', ZAPI_CLIENT_TOKEN ? `OK (${ZAPI_CLIENT_T
 console.log('[ENV] TYPEBOT_TOKEN:', TYPEBOT_TOKEN ? 'OK' : 'MISSING');
 console.log('[ENV] TYPEBOT_API_URL:', TYPEBOT_API_URL);
 
-// ── Sessões persistidas em arquivo ───────────────────────────────────────────
+// ── Sessões persistidas em arquivo com TTL ────────────────────────────────────
 const SESSIONS_FILE = '/app/sessions.json';
+const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutos
 
 function loadSessions() {
   try {
@@ -44,7 +45,24 @@ function saveSessions(sessions) {
   }
 }
 
+function pruneExpired(sessions) {
+  const now = Date.now();
+  let pruned = 0;
+  for (const phone of Object.keys(sessions)) {
+    const s = sessions[phone];
+    if (s.at && now - s.at > SESSION_TTL_MS) {
+      delete sessions[phone];
+      pruned++;
+    }
+  }
+  if (pruned) {
+    console.log('[SESSIONS] expiradas removidas:', pruned);
+    saveSessions(sessions);
+  }
+}
+
 const sessions = loadSessions();
+pruneExpired(sessions);
 console.log('[SESSIONS] carregadas:', Object.keys(sessions).length);
 
 // ── Z-API helpers ─────────────────────────────────────────────────────────────
@@ -142,33 +160,51 @@ app.post('/webhook', async (req, res) => {
     return;
   }
 
+  pruneExpired(sessions);
+
   try {
     let responseData;
 
-    if (sessions[phone]) {
-      console.log('[SESSION] continuando:', sessions[phone]);
-      const resp = await axios.post(
-        `${TYPEBOT_API_URL}/api/v1/sessions/${sessions[phone]}/continueChat`,
-        { message: String(text) },
-        { headers: { Authorization: `Bearer ${TYPEBOT_TOKEN}` } }
-      );
-      responseData = resp.data;
-      if (responseData.status === 'ended') {
-        delete sessions[phone];
-        saveSessions(sessions);
-        console.log('[SESSION] encerrada');
-      }
-    } else {
+    const startChat = async () => {
       console.log('[SESSION] iniciando novo chat');
       const resp = await axios.post(
         `${TYPEBOT_API_URL}/api/v1/typebots/${TYPEBOT_ID}/startChat`,
         { prefilledVariables: { phone } },
         { headers: { Authorization: `Bearer ${TYPEBOT_TOKEN}` } }
       );
-      responseData = resp.data;
-      sessions[phone] = resp.data.sessionId;
+      sessions[phone] = { id: resp.data.sessionId, at: Date.now() };
       saveSessions(sessions);
       console.log('[SESSION] nova:', resp.data.sessionId);
+      return resp.data;
+    };
+
+    if (sessions[phone]) {
+      const sid = sessions[phone].id || sessions[phone];
+      console.log('[SESSION] continuando:', sid);
+      try {
+        const resp = await axios.post(
+          `${TYPEBOT_API_URL}/api/v1/sessions/${sid}/continueChat`,
+          { message: String(text) },
+          { headers: { Authorization: `Bearer ${TYPEBOT_TOKEN}` } }
+        );
+        responseData = resp.data;
+        // atualiza timestamp de atividade
+        sessions[phone] = { id: sid, at: Date.now() };
+        saveSessions(sessions);
+        if (responseData.status === 'ended') {
+          delete sessions[phone];
+          saveSessions(sessions);
+          console.log('[SESSION] encerrada');
+        }
+      } catch (sessionErr) {
+        // Sessão expirada ou inválida no Typebot → reinicia
+        console.log('[SESSION] inválida, reiniciando. Erro:', sessionErr.response?.status || sessionErr.message);
+        delete sessions[phone];
+        saveSessions(sessions);
+        responseData = await startChat();
+      }
+    } else {
+      responseData = await startChat();
     }
 
     const msgTypes = (responseData.messages || []).map((m) => m.type);
@@ -207,6 +243,28 @@ app.get('/debug', async (req, res) => {
   }
 
   res.json(result);
+});
+
+// Resetar sessão de um número específico
+app.get('/reset/:phone', (req, res) => {
+  const { phone } = req.params;
+  if (sessions[phone]) {
+    delete sessions[phone];
+    saveSessions(sessions);
+    console.log('[RESET] sessão removida:', phone);
+    res.json({ ok: true, message: `Sessão de ${phone} removida` });
+  } else {
+    res.json({ ok: true, message: `Sem sessão ativa para ${phone}` });
+  }
+});
+
+// Limpar todas as sessões
+app.get('/clear-sessions', (_, res) => {
+  const count = Object.keys(sessions).length;
+  for (const k of Object.keys(sessions)) delete sessions[k];
+  saveSessions(sessions);
+  console.log('[CLEAR] todas as sessões removidas:', count);
+  res.json({ ok: true, cleared: count });
 });
 
 app.get('/health', (_, res) => res.json({ ok: true }));
