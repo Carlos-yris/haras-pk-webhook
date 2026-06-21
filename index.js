@@ -28,17 +28,14 @@ async function sendToZapi(phone, message) {
       console.log('[SEND-TEXT]', phone, '->', text.slice(0, 80));
       await axios.post(`${ZAPI_URL}/send-text`, { phone, message: text }, { headers: ZAPI_HEADERS });
     } else if (message.type === 'image') {
-      await axios.post(`${ZAPI_URL}/send-image`, {
-        phone,
-        image: message.content.url,
-        caption: message.content.caption || '',
-      }, { headers: ZAPI_HEADERS });
+      const payload = { phone, image: message.content.url };
+      if (message.content.caption) payload.caption = message.content.caption;
+      console.log('[SEND-IMAGE]', phone, '->', message.content.url);
+      await axios.post(`${ZAPI_URL}/send-image`, payload, { headers: ZAPI_HEADERS });
     } else if (message.type === 'video') {
-      await axios.post(`${ZAPI_URL}/send-video`, {
-        phone,
-        video: message.content.url,
-        caption: message.content.caption || '',
-      }, { headers: ZAPI_HEADERS });
+      const payload = { phone, video: message.content.url };
+      if (message.content.caption) payload.caption = message.content.caption;
+      await axios.post(`${ZAPI_URL}/send-video`, payload, { headers: ZAPI_HEADERS });
     } else {
       console.log('[SKIP] tipo não suportado:', message.type);
     }
