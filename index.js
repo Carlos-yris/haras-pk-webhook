@@ -64,16 +64,26 @@ async function processTypebotResponse(phone, data) {
   const messages = data.messages || [];
   const input = data.input;
 
-  for (const msg of messages) {
-    await sendToZapi(phone, msg);
-    await new Promise((r) => setTimeout(r, 500));
-  }
-
   if (input && input.type === 'choice input') {
     const buttons = input.items || [];
     const lastText = messages.filter((m) => m.type === 'text').pop();
-    const prompt = lastText ? '' : 'Escolha uma opção:';
-    await sendButtons(phone, prompt, buttons);
+    const otherMessages = lastText ? messages.filter((m) => m !== lastText) : messages;
+
+    for (const msg of otherMessages) {
+      await sendToZapi(phone, msg);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    const caption = lastText
+      ? (lastText.content?.markdown || lastText.content?.plainText || 'Escolha uma opção:')
+      : 'Escolha uma opção:';
+
+    await sendButtons(phone, caption, buttons);
+  } else {
+    for (const msg of messages) {
+      await sendToZapi(phone, msg);
+      await new Promise((r) => setTimeout(r, 500));
+    }
   }
 }
 
